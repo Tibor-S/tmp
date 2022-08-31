@@ -1,4 +1,7 @@
 
+from math import floor, log2
+from random import random
+from turtle import width
 from typing import TypeVar
 
 T = TypeVar('T')
@@ -52,7 +55,7 @@ IMAGE3 = [
     ['#FF0000', '#000000', '#FF0000', '#000000'],
     ['#FF0000', '#000000', '#FF0000', '#000000'],
 ]
-SOURCE = IMAGE1
+SOURCE = IMAGE2
 
 
 def contains(l: list[T], val: T):
@@ -139,12 +142,46 @@ class Cell:
         self.x = x
         self.y = y
         self.N = N
+        self.pWeights = {}
+        self.patternIDs = []
+        self.propogated = False
 
     def populate(self, patterns: dict[int, Pattern], pWeights: dict[int, int]):
         self.patternIDs = list(patterns.keys())
         self.patterns = patterns
         self.pWeights = pWeights
 
+        return self
+
+    def collapse(self):
+        probs = [self.pWeights[pID] for pID in self.patternIDs]
+        tot = sum(probs)
+        n = floor(tot * random())
+        i = -1
+        while n > 0:
+            i += 1
+            n -= probs[i]
+        pID = self.patternIDs[i]
+        for rpID in self.patternIDs.copy():
+            if rpID != pID:
+                self.removeID(rpID)
+
+        # print(self.patterns[pID].relations)
+
+        return self
+
+    def entropy(self):
+        probs = [self.pWeights[pID] for pID in self.patternIDs]
+        tot = sum(probs)
+        return sum([-(p/tot)*log2(p/tot) for p in probs])
+
+    def propogate(self, cells: dict[tuple[int, int]: 'Cell']):
+        directions = [(0, -1), (1, 0), (0, 1), (-1, 0)]
+        for dx, dy in directions:
+            cx, cy = self.x + dx, self.y + dy
+            cell2 = cells.get((cx, cy), Cell(-1, -1, -1))
+            self.updRelations(cell2)
+        self.propogated = True
         return self
 
     def updRelations(self, cell2: 'Cell'):
@@ -162,7 +199,6 @@ class Cell:
 
         remove = []
         for patternID2 in cell2.patternIDs:
-            print(patternID2)
             valid = False
             for patternID1 in self.patternIDs:
                 pattern1 = self.patterns[patternID1]
@@ -179,7 +215,6 @@ class Cell:
         return self
 
     def removeID(self, id: int):
-        print('remove')
         self.patternIDs.remove(id)
         return self
 
@@ -199,15 +234,34 @@ class Cell:
     def relative(self, x: int, y: int):
         return x - self.x, y - self.y
 
+    def isDummy(self):
+        return self.x == -1 and self.y == -1 and self.N == -1
+
+    def isCorrupt(self):
+        return len(self.patternIDs) == 0
+
 
 class Map:
+    class Contradiction(Exception):
+        def __init__(self, attempt: int, message: str = "Contradiction occured"):
+            self.attempt = attempt
+            self.message = message
+            super().__init__(self.message)
+
+        def __str__(self):
+            return 'Attempt %d -- %s' % (self.attempt, self.message)
+
     palette: dict[int, str]
     source: list[list[int]]
     patterns: PattternDict
     pWeights: dict[int, int]
+    cells: dict[tuple[int, int], Cell]
 
-    def __init__(self, N):
+    def __init__(self, N, width=-1, height=-1):
         self.N = N
+        self.width = width
+        self.height = height
+        self.cells = {}
 
     def scanImg(self, source: list[list[str]]):
         self.palette: dict[int, str] = {}
@@ -249,12 +303,11 @@ class Map:
                     if pattern.similar(recPattern):
                         pKey = key
 
-                if pKey != -1:
-                    self.pWeights[pKey] = self.pWeights.get(pKey, 0) + 1
-                else:
+                if pKey == -1:
                     pKey = nKeys + 1
                     pattern.setID(pKey)
                     self.patterns[pKey] = pattern
+                self.pWeights[pKey] = self.pWeights.get(pKey, 0) + 1
 
         # Relate Patterns
         for pattern1 in self.patterns.values():
@@ -263,16 +316,91 @@ class Map:
 
         return self
 
+    def populate(self):
+        self.cells = {}
+        for y in range(self.height):
+            for x in range(self.width):
+                self.cells[(x, y)] = Cell(x, y, self.N)
+        for cell in self.cells.values():
+            cell.populate(self.patterns, self.pWeights)
+        return self
 
-# for y in range(len(SOURCE)):
-#     for x in range(len(SOURCE[0])):
-#         Pattern(3).fromImg(x, y, Map(3, SOURCE).source).render()
-map = Map(3).scanImg(SOURCE).extractPatterns()
+    def lowestEntropy(self):
+        le = -1
+        lc = Cell(-1, -1, -1)
 
-cell1 = Cell(0, 0, 3).populate(map.patterns, map.pWeights)
-cell2 = Cell(1, 0, 3).populate(map.patterns, map.pWeights)
+        for cell in self.cells.values():
+            ent = cell.entropy()
+            # print(le, lc.x, lc.y, '|||', ent, cell.x, cell.y, '|||',
+            #   not cell.propogated and (le == -1 or ent < le))
+            if not cell.propogated and (le == -1 or ent < le):
+                le = ent
+                lc = cell
 
-cell1.patternIDs = [1]
-cell1.updRelations(cell2)
-print(cell1.patterns[1].relations)
-print(cell2.patternIDs)
+        return lc
+
+    def renderSrc(self):
+
+        for row in self.source:
+            for cell in row:
+                print('\033[%dm • \033[0m' % (40 + cell), end='')
+            print('')
+
+    def renderClr(self):
+        cellMap = [[-1for __x__ in range(self.width)]
+                   for __y__ in range(self.height)]
+        for cell in self.cells.values():
+            if len(cell.patternIDs) == 1:
+                cellMap[cell.y][cell.x] = cell.patternIDs[0]
+
+        for row in cellMap:
+            for cell in row:
+                print('\033[%dm • \033[0m' %
+                      (40 + self.patterns[cell].rule[(0, 0)]), end='')
+            print('')
+
+    def renderIDs(self):
+        cellMap = [['¤¤U¤¤' for __x__ in range(self.width)]
+                   for __y__ in range(self.height)]
+        for cell in self.cells.values():
+            if len(cell.patternIDs) == 1:
+                cellMap[cell.y][cell.x] = cell.patternIDs[0]
+            else:
+                cellMap[cell.y][cell.x] = 'l' + str(len(cell.patternIDs))
+
+        for row in cellMap:
+            for cell in row:
+                print(str(cell).ljust(3, ' ').rjust(5, ' '), end='')
+            print('')
+
+        return self
+
+    def reset(self):
+        self.populate()
+        return self
+
+    def solve(self):
+        solved = False
+        attempt = 1
+        while not solved:
+            try:
+                cell = self.lowestEntropy()
+                while not cell.isDummy():
+                    if cell.isCorrupt():
+                        raise self.Contradiction(attempt)
+                    cell.collapse().propogate(self.cells)
+                    cell = self.lowestEntropy()
+                solved = True
+            except self.Contradiction:
+                print('Contradiction -- Attempt:', attempt)
+                self.reset()
+                attempt += 1
+
+        return self
+
+
+map = Map(3, 32, 32).scanImg(SOURCE).extractPatterns().populate().solve()
+map.renderSrc()
+map.renderIDs()
+map.renderClr()
+print('done')
